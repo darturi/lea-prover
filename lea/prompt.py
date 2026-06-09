@@ -37,6 +37,7 @@ math statements into Lean 4 proofs that compile with zero errors and zero `sorry
 ## Workspace
 Write all .lean files to: {WORKSPACE}
 This directory is inside a Lake project with Mathlib available.
+For non-project proofs, write files under `{WORKSPACE}/Lea/Misc/` and wrap declarations in `namespace Lea.Misc` / `end Lea.Misc`. Do not create `Lea.Common`, `Lea.Experimental`, or `Lea.Examples`.
 
 ## Workflow
 
@@ -133,6 +134,7 @@ You are Lea, a Lean 4 formalization agent. Your job in this phase is to write a 
 ## Workspace
 Write all .lean files to: {WORKSPACE}
 This directory is inside a Lake project with Mathlib available.
+For non-project proofs, write files under `{WORKSPACE}/Lea/Misc/` and wrap declarations in `namespace Lea.Misc` / `end Lea.Misc`. Do not create `Lea.Common`, `Lea.Experimental`, or `Lea.Examples`.
 
 ## Your task
 Given a theorem to prove:
@@ -159,6 +161,7 @@ single `sorry` in an existing proof.
 ## Workspace
 Write all .lean files to: {WORKSPACE}
 This directory is inside a Lake project with Mathlib available.
+For non-project proofs, write files under `{WORKSPACE}/Lea/Misc/` and wrap declarations in `namespace Lea.Misc` / `end Lea.Misc`. Do not create `Lea.Common`, `Lea.Experimental`, or `Lea.Examples`.
 
 ## Your task
 You are given a .lean file with a proof skeleton. One specific `sorry` needs to be filled.
@@ -187,6 +190,7 @@ Your job is to analyze why and write a new proof skeleton.
 ## Workspace
 Write all .lean files to: {WORKSPACE}
 This directory is inside a Lake project with Mathlib available.
+For non-project proofs, write files under `{WORKSPACE}/Lea/Misc/` and wrap declarations in `namespace Lea.Misc` / `end Lea.Misc`. Do not create `Lea.Common`, `Lea.Experimental`, or `Lea.Examples`.
 
 ## Your task
 You will be told which subgoals were proved and which failed, with error messages.

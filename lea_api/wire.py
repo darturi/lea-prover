@@ -22,6 +22,7 @@ from lea.events import (
     ApprovalRequested,
     ApprovalResolved,
     Finished,
+    ProjectEntryUpdated,
     SessionResumed,
     ToolCalled,
     ToolResulted,
@@ -72,6 +73,16 @@ def to_frame(ev, run_id: str) -> dict:
     if isinstance(ev, UsageUpdated):
         return {"type": "usage_updated", "input_tokens": ev.input_tokens,
                 "output_tokens": ev.output_tokens, "cost": ev.cost}
+    if isinstance(ev, ProjectEntryUpdated):
+        return {
+            "type": "project_entry_updated",
+            "project_id": ev.project_id,
+            "project_path": ev.project_path,
+            "theorem_name": ev.theorem_name,
+            "proof_path": ev.proof_path,
+            "module_name": ev.module_name,
+            "entry_action": ev.entry_action,
+        }
     if isinstance(ev, Finished):
         return {
             "type": "finished",

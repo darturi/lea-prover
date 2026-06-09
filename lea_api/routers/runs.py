@@ -15,6 +15,8 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from lea.project import ProjectContext, load_project_context
+
 from ..jobs import RunManager, RunState
 from ..wire import TERMINAL_TYPES
 
@@ -26,6 +28,7 @@ class RunRequest(BaseModel):
     config: dict | None = None
     config_ref: str | None = None
     resume: bool | str = False
+    project: dict | None = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -58,7 +61,24 @@ def start_run(request: Request, req: RunRequest, response: Response) -> dict:
 
     from .. import config_support
     cfg = config_support.resolve(req.config)  # ConfigError -> typed 400/422, no run created
-    state = _manager(request).start(cfg, req.task, resume=req.resume)
+    project = None
+    if req.project is not None:
+        try:
+            project_ctx = load_project_context(ProjectContext(
+                project_id=str(req.project.get("project_id") or ""),
+                project_path=req.project.get("project_path"),
+                project_context=req.project.get("project_context"),
+                record_on_success=bool(req.project.get("record_on_success", True)),
+            ))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        project = None if project_ctx is None else {
+            "project_id": project_ctx.project_id,
+            "project_path": project_ctx.project_path,
+            "project_context": project_ctx.project_context,
+            "record_on_success": project_ctx.record_on_success,
+        }
+    state = _manager(request).start(cfg, req.task, resume=req.resume, project=project)
     response.headers["Location"] = f"/v1/runs/{state.run_id}"
     return {"run_id": state.run_id, "status": state.status,
             "events_url": f"/v1/runs/{state.run_id}/events"}

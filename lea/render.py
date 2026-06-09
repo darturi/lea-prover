@@ -17,6 +17,7 @@ from .events import (
     ApprovalRequested,
     ApprovalResolved,
     UsageUpdated,
+    ProjectEntryUpdated,
     Finished,
 )
 
@@ -101,6 +102,12 @@ def render_to_stdout(events) -> tuple[str, dict]:
             print(
                 f"  [turn {current_turn}: {turn_tok:,} tok · ${event.cost:.6f} "
                 f"| total: {cum_tok:,} tok · ${cum_cost:.6f}]",
+                flush=True,
+            )
+        elif isinstance(event, ProjectEntryUpdated):
+            print(
+                f"\nRecorded `{event.theorem_name}` in project `{event.project_id}` "
+                f"({event.entry_action}): {event.project_path}",
                 flush=True,
             )
         elif isinstance(event, Finished):

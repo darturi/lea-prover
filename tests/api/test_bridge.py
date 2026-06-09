@@ -138,3 +138,30 @@ def test_cancel_while_paused():
         assert state.events[-1]["reason"] == "cancelled"
     finally:
         mgr.shutdown()
+
+
+def test_project_payload_is_passed_to_project_aware_runner():
+    seen = {}
+
+    def runner(config, task, *, resume=False, project=None):
+        seen["project"] = project
+        yield from sample_events()
+
+    mgr = RunManager(runner=runner)
+    try:
+        state = mgr.start(default_config(), "x", project={"project_id": "epsilon"})
+        wait_done(state)
+        assert seen["project"] == {"project_id": "epsilon"}
+        assert state.status == "completed"
+    finally:
+        mgr.shutdown()
+
+
+def test_project_payload_does_not_break_legacy_runner():
+    mgr = RunManager(runner=scripted_runner(sample_events()))
+    try:
+        state = mgr.start(default_config(), "x", project={"project_id": "epsilon"})
+        wait_done(state)
+        assert state.status == "completed"
+    finally:
+        mgr.shutdown()

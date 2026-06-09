@@ -34,11 +34,12 @@ def check(name: str, cond: bool) -> None:
 
 def install_fakes():
     """Patch the agent's collaborators; returns a fresh two-turn fake stream."""
-    calls = {"n": 0, "systems": []}
+    calls = {"n": 0, "systems": [], "messages": []}
 
     def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
         calls["systems"].append(system)
+        calls["messages"].append(messages)
         if calls["n"] == 1:
             yield TextDelta("Let me check. ")
             yield ToolCall("echo", {"x": 1})
@@ -109,10 +110,11 @@ def cfg_approval():
 
 
 def install_approval_fake(*, guard_drift=False):
-    calls = {"n": 0, "proposal_count": 0, "guard_called": False}
+    calls = {"n": 0, "proposal_count": 0, "guard_called": False, "messages": []}
 
     def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
+        calls["messages"].append(messages)
         if "theorem-translation review mode" in system:
             calls["proposal_count"] += 1
             name = "approved_theorem"
@@ -384,6 +386,33 @@ def test_accepted_theorem_header_guard():
     check("header drift rejected by guarded write_file", guarded and "accepted top-level theorem" in guarded[0].content)
 
 
+def test_project_context_is_injected_into_proof_loop():
+    calls = install_fakes()
+    events = list(agent.run_events(
+        cfg(),
+        "prove it",
+        project={"project_id": "epsilon", "project_context": "## Theorem: helper\n`workspace/proofs/helper.lean`"},
+    ))
+    check("project run still completes", isinstance(events[-1], Finished))
+    first_messages = calls["messages"][0]
+    check("project context prepended", "Existing project facts" in first_messages[0]["content"])
+    check("task remains present", first_messages[1]["content"] == "prove it")
+
+
+def test_project_context_is_injected_into_theorem_translation():
+    calls = install_approval_fake()
+    gen = agent.run_events(
+        cfg_approval(),
+        "prove a thing",
+        project={"project_id": "epsilon", "project_context": "helper theorem lives here"},
+    )
+    _, approval = collect_until(gen, ApprovalRequested)
+    check("project approval emitted", isinstance(approval, ApprovalRequested))
+    first_messages = calls["messages"][0]
+    check("project context reaches preflight", "Existing project facts" in first_messages[0]["content"])
+    check("preflight task remains present", first_messages[1]["content"] == "prove a thing")
+
+
 def main():
     print("agent (run_events + run) tests:")
     test_run_events_sequence()
@@ -398,6 +427,8 @@ def main():
     test_theorem_translation_failure_reports_all_attempts()
     test_theorem_translation_retry_config_honored()
     test_accepted_theorem_header_guard()
+    test_project_context_is_injected_into_proof_loop()
+    test_project_context_is_injected_into_theorem_translation()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): {', '.join(_FAILURES)}")

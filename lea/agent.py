@@ -25,8 +25,10 @@ from .events import (
     ApprovalRequested,
     ApprovalResolved,
     UsageUpdated,
+    ProjectEntryUpdated,
     Finished,
 )
+from .project import ProjectContext, project_context_message, record_project_entry
 from .render import render_to_stdout
 
 SESSIONS_DIR = Path.home() / ".lea" / "sessions"
@@ -159,13 +161,18 @@ def _checked_theorem_translation(
     config: LeaConfig,
     candidate: int,
     session_id: str,
+    project: ProjectContext | None = None,
 ):
     """Generate and typecheck a theorem translation candidate.
 
     Retries invalid Lean internally according to config. Returns
     (code, theorem_name, check_result, usage, cost).
     """
-    messages = [{"role": "user", "content": task}]
+    messages = []
+    project_message = project_context_message(project)
+    if project_message:
+        messages.append(project_message)
+    messages.append({"role": "user", "content": task})
     if feedback:
         messages.append({
             "role": "user",
@@ -437,7 +444,13 @@ def list_sessions() -> list[dict]:
     return summaries
 
 
-def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
+def run_events(
+    config: LeaConfig,
+    task: str,
+    *,
+    resume: str | bool = False,
+    project: dict | ProjectContext | None = None,
+):
     """Core loop as a generator: yields typed events, never prints.
 
     Yields SessionResumed?, then per turn: TurnStarted, AssistantTextDelta*,
@@ -453,13 +466,19 @@ def run_events(config: LeaConfig, task: str, *, resume: str | bool = False):
         mcp_manager = MCPManager(config.mcp_servers)
         mcp_manager.start()
     try:
-        yield from _run_events_inner(config, task, resume=resume)
+        yield from _run_events_inner(config, task, resume=resume, project=project)
     finally:
         if mcp_manager is not None:
             mcp_manager.stop()
 
 
-def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = False):
+def _run_events_inner(
+    config: LeaConfig,
+    task: str,
+    *,
+    resume: str | bool = False,
+    project: dict | ProjectContext | None = None,
+):
     system = load_system_prompt(config.prompt_variant, config.skills)
     if config.narrate_tool_steps:
         system += _NARRATE_TOOL_STEPS_INSTRUCTION
@@ -469,6 +488,13 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
     # tools register, then select per config (None → all registered tools).
     import_tool_modules(config.tool_modules)
     tools_schema, tool_handlers = build_toolset(config.tools)
+    if isinstance(project, dict):
+        project = ProjectContext(
+            project_id=str(project.get("project_id") or ""),
+            project_path=project.get("project_path"),
+            project_context=project.get("project_context"),
+            record_on_success=bool(project.get("record_on_success", True)),
+        )
 
     if resume:
         session = _load_session(resume if isinstance(resume, str) else None)
@@ -484,10 +510,15 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
         yield SessionResumed(session_id, len(messages))
     else:
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        messages = [{"role": "user", "content": task}]
+        messages = []
+        project_message = project_context_message(project)
+        if project_message:
+            messages.append(project_message)
+        messages.append({"role": "user", "content": task})
         total_usage = Usage()
 
     total_cost = 0.0
+    accepted_signature: str | None = None
 
     def transcript(turns: int) -> dict:
         clean = []
@@ -520,6 +551,7 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
                     config=config,
                     candidate=candidate,
                     session_id=session_id,
+                    project=project,
                 )
             except TheoremTranslationError as e:
                 total_usage.input_tokens += e.usage.input_tokens
@@ -572,6 +604,7 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
             yield ApprovalResolved(approval_id, decision, rejection_feedback)
 
             if decision == "accept":
+                accepted_signature = code
                 accepted_header = _theorem_header(code, theorem_name)
                 tool_handlers = _guarded_tool_handlers(tool_handlers, accepted_header, theorem_name)
                 messages.append({
@@ -679,8 +712,30 @@ def _run_events_inner(config: LeaConfig, task: str, *, resume: str | bool = Fals
         if not tool_calls:
             _save_session(session_id, model, messages, total_usage)
             text = "".join(p["text"] for p in assistant_parts if p["type"] == "text")
+            final_transcript = transcript(turn)
+            if project:
+                try:
+                    update = record_project_entry(
+                        project=project,
+                        task=task,
+                        transcript=final_transcript,
+                        signature=accepted_signature,
+                    )
+                    if update:
+                        yield ProjectEntryUpdated(
+                            update.project_id,
+                            update.project_path,
+                            update.theorem_name,
+                            update.proof_path,
+                            update.entry_action,
+                            update.module_name,
+                        )
+                except Exception as exc:
+                    yield AssistantTextDelta(
+                        f"\n\nProject recording failed: {type(exc).__name__}: {exc}"
+                    )
             yield Finished("completed", text or "(no response)", turn, session_id, model,
-                           total_usage, total_cost, transcript(turn))
+                           total_usage, total_cost, final_transcript)
             return
 
         tool_results = []

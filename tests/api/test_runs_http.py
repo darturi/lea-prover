@@ -128,6 +128,35 @@ async def test_bad_config_returns_422_no_run(build_app):
 
 
 @pytest.mark.asyncio
+async def test_bad_project_returns_422_no_run(build_app):
+    app, mgr = build_app(scripted_runner([]))
+    mgr.bind_loop(asyncio.get_running_loop())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await client.post("/v1/runs", json={"task": "x", "project": {"project_id": "../bad"}})
+        assert r.status_code == 422
+        assert (await client.get("/v1/runs")).json()["runs"] == []
+
+
+@pytest.mark.asyncio
+async def test_project_payload_is_accepted(build_app):
+    seen = {}
+
+    def runner(config, task, *, resume=False, project=None):
+        seen["project"] = project
+        yield from sample_events()
+
+    app, mgr = build_app(runner)
+    mgr.bind_loop(asyncio.get_running_loop())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await client.post("/v1/runs", json={"task": "x", "project": {"project_id": "epsilon"}})
+        assert r.status_code == 202
+        await _wait_completed(client, r.json()["run_id"])
+    assert seen["project"]["project_id"] == "epsilon"
+
+
+@pytest.mark.asyncio
 async def test_unknown_run_404(build_app):
     app, mgr = build_app(scripted_runner([]))
     mgr.bind_loop(asyncio.get_running_loop())

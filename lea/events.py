@@ -72,6 +72,17 @@ class UsageUpdated:
 
 
 @dataclass(frozen=True)
+class ProjectEntryUpdated:
+    """A successful proof was recorded in a project markdown file."""
+    project_id: str
+    project_path: str
+    theorem_name: str
+    proof_path: str
+    entry_action: str
+    module_name: str | None = None
+
+
+@dataclass(frozen=True)
 class Finished:
     """Terminal event. `reason` is "completed" or "max_turns"."""
     reason: str
@@ -94,5 +105,6 @@ AgentEvent = (
     | ApprovalRequested
     | ApprovalResolved
     | UsageUpdated
+    | ProjectEntryUpdated
     | Finished
 )

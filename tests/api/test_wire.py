@@ -4,6 +4,7 @@ from lea.events import (
     AssistantTextDelta,
     ApprovalRequested,
     ApprovalResolved,
+    ProjectEntryUpdated,
     SessionResumed,
     ToolCalled,
     ToolResulted,
@@ -43,6 +44,15 @@ def test_each_event_maps_to_its_frame():
     }
     assert wire.to_frame(UsageUpdated(5, 6, 0.02), rid) == {
         "type": "usage_updated", "input_tokens": 5, "output_tokens": 6, "cost": 0.02}
+    assert wire.to_frame(ProjectEntryUpdated("epsilon", "workspace/projects/epsilon.md", "t", "workspace/proofs/Lea/T.lean", "created", "Lea.T"), rid) == {
+        "type": "project_entry_updated",
+        "project_id": "epsilon",
+        "project_path": "workspace/projects/epsilon.md",
+        "theorem_name": "t",
+        "proof_path": "workspace/proofs/Lea/T.lean",
+        "module_name": "Lea.T",
+        "entry_action": "created",
+    }
 
 
 def test_finished_links_transcript_and_omits_it():

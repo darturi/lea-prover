@@ -19,6 +19,7 @@ to disk via the agent independently.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +44,7 @@ class RunState:
     config: LeaConfig
     task: str
     resume: str | bool
+    project: dict | None = None
     status: str = "queued"               # queued|running|completed|failed|cancelled
     events: list[dict] = field(default_factory=list)   # seq-stamped frames
     result: dict | None = None
@@ -104,9 +106,15 @@ class RunManager:
 
     # ---- run lifecycle ------------------------------------------------------
 
-    def start(self, config: LeaConfig, task: str, resume: str | bool = False) -> RunState:
+    def start(
+        self,
+        config: LeaConfig,
+        task: str,
+        resume: str | bool = False,
+        project: dict | None = None,
+    ) -> RunState:
         run_id = "run_" + secrets.token_hex(8)
-        state = RunState(run_id=run_id, config=config, task=task, resume=resume)
+        state = RunState(run_id=run_id, config=config, task=task, resume=resume, project=project)
         with self._registry_lock:
             self._runs[run_id] = state
         self._pool.submit(self._work, state)
@@ -137,7 +145,7 @@ class RunManager:
 
     def _work(self, state: RunState) -> None:
         state.status = "running"
-        gen = self._runner(state.config, state.task, resume=state.resume)
+        gen = self._runner_with_project(state)
 
         # Running totals, so a synthesized cancel/error terminal frame can carry
         # the usage seen so far (mirrors what the agent accumulates internally).
@@ -247,6 +255,16 @@ class RunManager:
         if self._loop is None:
             return  # no event loop bound (e.g. unit test without HTTP); buffer is still authoritative
         self._loop.call_soon_threadsafe(q.put_nowait, item)
+
+    def _runner_with_project(self, state: RunState):
+        signature = inspect.signature(self._runner)
+        params = signature.parameters
+        accepts_project = "project" in params or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_project:
+            return self._runner(state.config, state.task, resume=state.resume, project=state.project)
+        return self._runner(state.config, state.task, resume=state.resume)
 
     def subscribe(self, state: RunState, start_seq: int):
         """Register a live subscriber and return (queue, backlog).

@@ -72,12 +72,21 @@ def test_wired_into_prompt():
     check("skill comes after base content", with_skill.startswith(base[:200]))
 
 
+def test_prompt_guides_non_project_proofs_to_misc_namespace():
+    prompt = load_system_prompt("default", None)
+    check("prompt points non-project proofs to Lea.Misc", "namespace Lea.Misc" in prompt)
+    check("prompt disallows common namespace", "Lea.Common" in prompt)
+    check("prompt disallows experimental namespace", "Lea.Experimental" in prompt)
+    check("prompt disallows examples namespace", "Lea.Examples" in prompt)
+
+
 def main():
     print("skills tests:")
     test_empty()
     test_order_and_headers()
     test_missing_file()
     test_wired_into_prompt()
+    test_prompt_guides_non_project_proofs_to_misc_namespace()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): {', '.join(_FAILURES)}")
