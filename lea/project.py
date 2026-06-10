@@ -39,6 +39,20 @@ class ProjectUpdateResult:
     module_name: str | None = None
 
 
+@dataclass(frozen=True)
+class ProjectTheoremEntry:
+    name: str
+    proof_path: str
+    module_name: str | None = None
+
+
+@dataclass(frozen=True)
+class _ProjectTheoremSection:
+    entry: ProjectTheoremEntry
+    start: int
+    end: int
+
+
 def validate_project_id(project_id: str) -> str:
     slug = str(project_id or "").strip()
     if not _SLUG_RE.fullmatch(slug):
@@ -202,6 +216,58 @@ def upsert_entry(markdown: str, theorem_name: str, entry: str) -> tuple[str, str
         end = marker_matches[index + 1].start() if index + 1 < len(marker_matches) else len(markdown)
         return markdown[:start].rstrip() + "\n\n" + entry.rstrip() + "\n", "updated"
     return markdown.rstrip() + "\n\n" + entry.rstrip() + "\n", "created"
+
+
+def parse_project_entries(markdown: str) -> list[ProjectTheoremEntry]:
+    return [section.entry for section in _project_theorem_sections(markdown)]
+
+
+def project_entry_for_theorem(markdown: str, theorem_name: str) -> ProjectTheoremEntry | None:
+    for entry in parse_project_entries(markdown):
+        if entry.name == theorem_name:
+            return entry
+    return None
+
+
+def remove_project_entry(markdown: str, theorem_name: str) -> tuple[str, ProjectTheoremEntry]:
+    for section in _project_theorem_sections(markdown):
+        if section.entry.name != theorem_name:
+            continue
+        updated = markdown[:section.start].rstrip() + "\n\n" + markdown[section.end:].lstrip()
+        return updated.rstrip() + "\n", section.entry
+    raise ValueError(f"Project theorem entry not found: {theorem_name}")
+
+
+def _project_theorem_sections(markdown: str) -> list[_ProjectTheoremSection]:
+    marker_matches = list(_THEOREM_MARKER_RE.finditer(markdown))
+    sections: list[_ProjectTheoremSection] = []
+    for index, match in enumerate(marker_matches):
+        start = match.start()
+        end = marker_matches[index + 1].start() if index + 1 < len(marker_matches) else len(markdown)
+        attrs = _parse_theorem_marker_attrs(match.group(0))
+        name = attrs.get("name")
+        proof = attrs.get("proof")
+        if not name or not proof:
+            continue
+        sections.append(
+            _ProjectTheoremSection(
+                entry=ProjectTheoremEntry(
+                    name=html.unescape(name),
+                    proof_path=html.unescape(proof),
+                    module_name=html.unescape(attrs["module"]) if attrs.get("module") else None,
+                ),
+                start=start,
+                end=end,
+            )
+        )
+    return sections
+
+
+def _parse_theorem_marker_attrs(marker: str) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in re.findall(r'([A-Za-z_][A-Za-z0-9_-]*)="([^"]*)"', marker)
+    }
 
 
 def final_proof_path(transcript: dict[str, Any]) -> str | None:

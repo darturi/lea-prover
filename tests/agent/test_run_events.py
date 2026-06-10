@@ -24,6 +24,7 @@ from lea.events import (
 
 _FAILURES: list[str] = []
 _ORIGINAL_PROPOSAL_FILE = agent._proposal_file
+_ORIGINAL_RECORD_PROJECT_ENTRY = agent.record_project_entry
 
 
 def check(name: str, cond: bool) -> None:
@@ -181,6 +182,121 @@ def install_preflight_fake(proposals, check_for_code):
     return calls
 
 
+def install_final_gate_fake(*, check_outputs, final_texts=None):
+    calls = {"n": 0, "messages": [], "checks": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Gate.lean")
+    final_texts = final_texts or ["All done.", "Fixed now."]
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        calls["n"] += 1
+        calls["messages"].append(messages)
+        if calls["n"] == 1:
+            yield TextDelta("Writing proof.")
+            yield ToolCall("write_file", {"path": proof_path, "content": "theorem gate : True := by trivial\n"})
+            yield _ToolMeta("call_write")
+            yield Done(Usage(10, 5), 0.001)
+            return
+        index = min(calls["n"] - 2, len(final_texts) - 1)
+        yield TextDelta(final_texts[index])
+        yield Done(Usage(3, 2), 0.0002)
+
+    def fake_lean_check(path):
+        calls["checks"].append(path)
+        index = min(len(calls["checks"]) - 1, len(check_outputs) - 1)
+        return check_outputs[index]
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = fake_lean_check
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls, proof_path
+
+
+def install_final_gate_repair_fake():
+    calls = {"n": 0, "messages": [], "checks": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Repair.lean")
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        calls["n"] += 1
+        calls["messages"].append(messages)
+        if calls["n"] == 1:
+            yield TextDelta("Writing proof.")
+            yield ToolCall("write_file", {"path": proof_path, "content": "theorem repair : True := by trivial\n"})
+            yield _ToolMeta("call_write")
+            yield Done(Usage(10, 5), 0.001)
+            return
+        if calls["n"] == 2:
+            yield TextDelta("All done.")
+            yield Done(Usage(3, 2), 0.0002)
+            return
+        if calls["n"] == 3:
+            yield TextDelta("Repairing.")
+            yield ToolCall("edit_file", {
+                "path": proof_path,
+                "old_string": "trivial",
+                "new_string": "trivial",
+            })
+            yield _ToolMeta("call_edit")
+            yield Done(Usage(4, 2), 0.0002)
+            return
+        yield TextDelta("Fixed now.")
+        yield Done(Usage(3, 2), 0.0002)
+
+    def fake_lean_check(path):
+        calls["checks"].append(path)
+        if len(calls["checks"]) == 1:
+            return "Repair.lean:2:2: error: No goals to be solved"
+        return "OK — no errors, no warnings."
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = fake_lean_check
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls, proof_path
+
+
+def install_explicit_check_fake(*, edit_after_check=False):
+    calls = {"n": 0, "messages": [], "checks": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Explicit.lean")
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        calls["n"] += 1
+        calls["messages"].append(messages)
+        if calls["n"] == 1:
+            yield TextDelta("Writing and checking.")
+            yield ToolCall("write_file", {"path": proof_path, "content": "theorem explicit : True := by trivial\n"})
+            yield _ToolMeta("call_write")
+            yield ToolCall("lean_check", {"path": proof_path})
+            yield _ToolMeta("call_check")
+            yield Done(Usage(10, 5), 0.001)
+            return
+        if edit_after_check and calls["n"] == 2:
+            yield TextDelta("Polishing.")
+            yield ToolCall("edit_file", {
+                "path": proof_path,
+                "old_string": "trivial",
+                "new_string": "trivial",
+            })
+            yield _ToolMeta("call_edit")
+            yield Done(Usage(4, 2), 0.0002)
+            return
+        yield TextDelta("All done.")
+        yield Done(Usage(3, 2), 0.0002)
+
+    def fake_lean_check(path):
+        calls["checks"].append(path)
+        return "OK — no errors, no warnings."
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = fake_lean_check
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls, proof_path
+
+
 def collect_until(gen, event_type):
     events = []
     while True:
@@ -268,6 +384,81 @@ def test_run_wrapper_return_shape():
     with redirect_stdout(io.StringIO()):
         out2 = agent.run("prove it", model="gemini/test")
     check("run() without transcript returns str", isinstance(out2, str) and out2 == "All done.")
+
+
+def test_final_gate_failed_check_resumes_loop():
+    calls, proof_path = install_final_gate_repair_fake()
+    events = list(agent.run_events(cfg(max_turns=4), "prove it"))
+    fin = events[-1]
+    check("failed final gate eventually completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("final gate checked before and after repair", calls["checks"] == [proof_path, proof_path])
+    check("failed gate resumed the model loop", calls["n"] == 4)
+    saw_failure_prompt = any(
+        isinstance(message.get("content"), str)
+        and "final verification gate failed" in message["content"]
+        and "No goals to be solved" in message["content"]
+        for message in calls["messages"][2]
+    )
+    check("model received final gate failure", saw_failure_prompt)
+
+
+def test_failed_final_gate_respects_max_turns():
+    calls, proof_path = install_final_gate_fake(
+        check_outputs=["Gate.lean:2:2: error: No goals to be solved"],
+        final_texts=["All done."],
+    )
+    events = list(agent.run_events(cfg(max_turns=2), "prove it"))
+    fin = events[-1]
+    check("failed final gate hits max_turns next", isinstance(fin, Finished) and fin.reason == "max_turns")
+    check("no extra model turn beyond max_turns", calls["n"] == 2)
+    check("failed final gate checked once with max_turns", calls["checks"] == [proof_path])
+
+
+def test_final_gate_success_allows_completion():
+    calls, proof_path = install_final_gate_fake(check_outputs=["OK — no errors, no warnings."])
+    events = list(agent.run_events(cfg(), "prove it"))
+    fin = events[-1]
+    check("passing final gate completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("passing final gate checked latest proof", calls["checks"] == [proof_path])
+
+
+def test_successful_explicit_check_skips_duplicate_final_gate():
+    calls, proof_path = install_explicit_check_fake()
+    events = list(agent.run_events(cfg(), "prove it"))
+    fin = events[-1]
+    check("explicit check completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("explicit successful check not duplicated", calls["checks"] == [proof_path])
+
+
+def test_edit_after_successful_check_rechecks_final_gate():
+    calls, proof_path = install_explicit_check_fake(edit_after_check=True)
+    events = list(agent.run_events(cfg(), "prove it"))
+    fin = events[-1]
+    check("edit after check completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("edit after check rechecked", calls["checks"] == [proof_path, proof_path])
+
+
+def test_project_entry_recorded_after_final_gate_passes():
+    calls, proof_path = install_final_gate_fake(check_outputs=["OK — no errors, no warnings."])
+    recorded = {"count": 0}
+
+    def fake_record_project_entry(**kwargs):
+        recorded["count"] += 1
+        return None
+
+    agent.record_project_entry = fake_record_project_entry
+    try:
+        events = list(agent.run_events(
+            cfg(),
+            "prove it",
+            project={"project_id": "epsilon", "project_context": "facts"},
+        ))
+    finally:
+        agent.record_project_entry = _ORIGINAL_RECORD_PROJECT_ENTRY
+    fin = events[-1]
+    check("project final gate run completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("project entry recorded once after pass", recorded["count"] == 1)
+    check("project final gate checked before recording", calls["checks"] == [proof_path])
 
 
 def test_theorem_translation_accept_continues():
@@ -420,6 +611,12 @@ def main():
     test_narrate_tool_steps_instruction()
     test_narrate_tool_steps_forces_text_before_silent_tool_call()
     test_run_wrapper_return_shape()
+    test_final_gate_failed_check_resumes_loop()
+    test_failed_final_gate_respects_max_turns()
+    test_final_gate_success_allows_completion()
+    test_successful_explicit_check_skips_duplicate_final_gate()
+    test_edit_after_successful_check_rechecks_final_gate()
+    test_project_entry_recorded_after_final_gate_passes()
     test_theorem_translation_accept_continues()
     test_theorem_translation_reject_feedback_loops()
     test_theorem_translation_repairs_missing_import_before_approval()

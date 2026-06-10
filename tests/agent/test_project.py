@@ -70,6 +70,38 @@ def test_upsert_entry_appends_and_replaces_existing_theorem():
     assert "module=" not in markdown
 
 
+def test_parse_and_remove_project_entries():
+    first = project.render_project_entry(
+        theorem_name="first",
+        proof_path="workspace/proofs/Lea/Epsilon/first.lean",
+        module_name="Lea.Epsilon.first",
+        signature="theorem first : True := by",
+        description="First.",
+        solving_process="Done.",
+    )
+    second = project.render_project_entry(
+        theorem_name="second",
+        proof_path="workspace/proofs/Lea/Epsilon/second.lean",
+        module_name="Lea.Epsilon.second",
+        signature="theorem second : True := by",
+        description="Second.",
+        solving_process="Done.",
+    )
+    markdown = "# Project epsilon\n\n" + first + "\n" + second
+
+    entries = project.parse_project_entries(markdown)
+    assert [entry.name for entry in entries] == ["first", "second"]
+    assert entries[0].proof_path == "workspace/proofs/Lea/Epsilon/first.lean"
+    assert entries[0].module_name == "Lea.Epsilon.first"
+    assert project.project_entry_for_theorem(markdown, "second") == entries[1]
+
+    updated, removed = project.remove_project_entry(markdown, "first")
+
+    assert removed.name == "first"
+    assert "## Theorem: first" not in updated
+    assert "## Theorem: second" in updated
+
+
 def test_module_name_from_proof_path_only_for_importable_layout(monkeypatch, tmp_path):
     repo_root = tmp_path / "lea"
     monkeypatch.setattr(project, "REPO_ROOT", repo_root)

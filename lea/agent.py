@@ -135,6 +135,10 @@ def _lean_check_has_error(output: str) -> bool:
     return bool(re.search(r"(^|\n).*error[:\s]", output, re.IGNORECASE))
 
 
+def _tool_result_ok(output: str) -> bool:
+    return bool(output.strip()) and not output.strip().lower().startswith("error:")
+
+
 def _format_translation_attempt(attempt: dict) -> str:
     return (
         f"Attempt {attempt['attempt']} candidate:\n"
@@ -151,6 +155,56 @@ class TheoremTranslationError(RuntimeError):
         super().__init__(message)
         self.usage = usage
         self.cost = cost
+
+
+class ProofVerificationState:
+    """Track whether the latest Lean proof file has passed a fresh check."""
+
+    def __init__(self):
+        self.latest_proof_path: str | None = None
+        self.unchecked_write = False
+        self.latest_check_path: str | None = None
+        self.latest_check_output: str | None = None
+        self.latest_check_passed: bool | None = None
+
+    def note_tool_result(self, tool_name: str, args: dict, result: str) -> None:
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return
+        if tool_name in {"write_file", "edit_file"}:
+            if _tool_result_ok(result) and path.endswith(".lean"):
+                self.latest_proof_path = path
+                self.unchecked_write = True
+            return
+        if tool_name == "lean_check":
+            passed = not _lean_check_has_error(result)
+            self.latest_check_path = path
+            self.latest_check_output = result
+            self.latest_check_passed = passed
+            if path == self.latest_proof_path:
+                self.unchecked_write = False
+
+    def needs_final_check(self) -> bool:
+        if not self.latest_proof_path:
+            return False
+        return (
+            self.unchecked_write
+            or self.latest_check_path != self.latest_proof_path
+        )
+
+    def latest_proof_verified(self) -> bool:
+        return (
+            bool(self.latest_proof_path)
+            and not self.unchecked_write
+            and self.latest_check_path == self.latest_proof_path
+            and self.latest_check_passed is True
+        )
+
+
+_FINAL_GATE_FAILURE_MESSAGE = (
+    "Error: final verification gate failed. Lea claimed the proof was complete, "
+    "but the latest proof file did not pass lean_check."
+)
 
 
 def _checked_theorem_translation(
@@ -519,6 +573,7 @@ def _run_events_inner(
 
     total_cost = 0.0
     accepted_signature: str | None = None
+    proof_state = ProofVerificationState()
 
     def transcript(turns: int) -> dict:
         clean = []
@@ -710,8 +765,42 @@ def _run_events_inner(
         messages.append({"role": "assistant", "content": assistant_parts})
 
         if not tool_calls:
-            _save_session(session_id, model, messages, total_usage)
             text = "".join(p["text"] for p in assistant_parts if p["type"] == "text")
+            if proof_state.needs_final_check():
+                check_path = proof_state.latest_proof_path
+                assert check_path is not None
+                check_args = {"path": check_path}
+                yield ToolCalled("lean_check", check_args)
+                handler = tool_handlers.get("lean_check")
+                if handler:
+                    try:
+                        result = handler(check_args)
+                    except Exception as e:
+                        result = f"Error: tool 'lean_check' raised {type(e).__name__}: {e}"
+                else:
+                    result = "Error: unknown tool 'lean_check'"
+                preview = result[:200] + "..." if len(result) > 200 else result
+                yield ToolResulted("lean_check", result, preview)
+                proof_state.note_tool_result("lean_check", check_args, result)
+
+                tool_result = {"type": "tool_result", "tool_name": "lean_check", "content": result}
+                gate_call_id = f"final_gate_lean_check_{turn}"
+                messages.append({"role": "assistant", "content": [{
+                    "type": "tool_call",
+                    "name": "lean_check",
+                    "args": check_args,
+                    "id": gate_call_id,
+                }]})
+                tool_result["tool_use_id"] = gate_call_id
+                tool_result["tool_call_id"] = gate_call_id
+                messages.append({"role": "user", "content": [tool_result]})
+            if proof_state.latest_proof_path and not proof_state.latest_proof_verified():
+                diagnostic = proof_state.latest_check_output or "No successful lean_check was observed."
+                messages.append({"role": "user", "content": f"{_FINAL_GATE_FAILURE_MESSAGE}\n\n{diagnostic}"})
+                _save_session(session_id, model, messages, total_usage)
+                continue
+
+            _save_session(session_id, model, messages, total_usage)
             final_transcript = transcript(turn)
             if project:
                 try:
@@ -751,6 +840,7 @@ def _run_events_inner(
 
             preview = result[:200] + "..." if len(result) > 200 else result
             yield ToolResulted(tc["name"], result, preview)
+            proof_state.note_tool_result(tc["name"], tc["args"], result)
 
             tool_result = {"type": "tool_result", "tool_name": tc["name"], "content": result}
             if tc["id"]:
