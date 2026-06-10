@@ -25,6 +25,7 @@ workspace/proofs/*
 !workspace/proofs/.gitkeep
 workspace/*.lean
 !workspace/lakefile.lean
+workspace/projects/*
 
 # Vendored SafeVerify build/scratch artifacts (source is committed, build output isn't)
 third_party/SafeVerify/.sv_scratch/
