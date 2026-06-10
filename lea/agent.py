@@ -206,6 +206,12 @@ _FINAL_GATE_FAILURE_MESSAGE = (
     "but the latest proof file did not pass lean_check."
 )
 
+_NO_PROOF_ARTIFACT_MESSAGE = (
+    "Error: no proof artifact was produced. You must create a complete .lean file "
+    "with the write_file tool, then run lean_check on that file. Do not finish with "
+    "only prose or a Markdown code block."
+)
+
 
 def _checked_theorem_translation(
     *,
@@ -766,6 +772,10 @@ def _run_events_inner(
 
         if not tool_calls:
             text = "".join(p["text"] for p in assistant_parts if p["type"] == "text")
+            if not proof_state.latest_proof_path:
+                messages.append({"role": "user", "content": _NO_PROOF_ARTIFACT_MESSAGE})
+                _save_session(session_id, model, messages, total_usage)
+                continue
             if proof_state.needs_final_check():
                 check_path = proof_state.latest_proof_path
                 assert check_path is not None

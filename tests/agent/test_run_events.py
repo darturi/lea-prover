@@ -15,7 +15,6 @@ from pathlib import Path
 
 import lea.agent as agent
 from lea.config import LeaConfig
-from lea.registry import REGISTRY, Tool, register
 from lea.providers import TextDelta, ToolCall, Done, _ToolMeta, Usage
 from lea.events import (
     TurnStarted, AssistantTextDelta, ToolCalled, ToolResulted, ApprovalRequested,
@@ -35,7 +34,8 @@ def check(name: str, cond: bool) -> None:
 
 def install_fakes():
     """Patch the agent's collaborators; returns a fresh two-turn fake stream."""
-    calls = {"n": 0, "systems": [], "messages": []}
+    calls = {"n": 0, "systems": [], "messages": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Basic.lean")
 
     def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
@@ -43,22 +43,17 @@ def install_fakes():
         calls["messages"].append(messages)
         if calls["n"] == 1:
             yield TextDelta("Let me check. ")
-            yield ToolCall("echo", {"x": 1})
-            yield _ToolMeta("call_1")
+            yield ToolCall("write_file", {"path": proof_path, "content": "theorem basic : True := by trivial\n"})
+            yield _ToolMeta("call_write")
+            yield ToolCall("lean_check", {"path": proof_path})
+            yield _ToolMeta("call_check")
             yield Done(Usage(100, 40), 0.003)
         else:
             yield TextDelta("All done.")
             yield Done(Usage(20, 10), 0.001)
 
     agent.stream = fake_stream
-    # The loop dispatches through the registry now, so register a real "echo"
-    # tool (guarded — install_fakes runs per test) instead of patching a global.
-    if "echo" not in REGISTRY:
-        register(Tool(
-            name="echo",
-            schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
-            handler=lambda a: "echoed:" + str(a),
-        ))
+    agent._tools.lean_check = lambda path: "OK — no errors, no warnings."
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
     agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
@@ -66,7 +61,8 @@ def install_fakes():
 
 
 def install_silent_tool_fake():
-    calls = {"n": 0, "systems": []}
+    calls = {"n": 0, "systems": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Silent.lean")
 
     def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
@@ -75,20 +71,15 @@ def install_silent_tool_fake():
             yield TextDelta("I will explain the proof move before using the tool.")
             yield Done(Usage(5, 7), 0.0001)
         elif calls["n"] == 1:
-            yield ToolCall("echo", {"x": 1})
-            yield _ToolMeta("call_1")
+            yield ToolCall("write_file", {"path": proof_path, "content": "theorem silent : True := by trivial\n"})
+            yield _ToolMeta("call_write")
             yield Done(Usage(100, 40), 0.003)
         else:
             yield TextDelta("All done.")
             yield Done(Usage(20, 10), 0.001)
 
     agent.stream = fake_stream
-    if "echo" not in REGISTRY:
-        register(Tool(
-            name="echo",
-            schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
-            handler=lambda a: "echoed:" + str(a),
-        ))
+    agent._tools.lean_check = lambda path: "OK — no errors, no warnings."
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
     agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
@@ -111,7 +102,15 @@ def cfg_approval():
 
 
 def install_approval_fake(*, guard_drift=False):
-    calls = {"n": 0, "proposal_count": 0, "guard_called": False, "messages": []}
+    calls = {
+        "n": 0,
+        "proposal_count": 0,
+        "guard_called": False,
+        "proof_written": False,
+        "messages": [],
+        "tmpdir": tempfile.TemporaryDirectory(),
+    }
+    proof_path = str(Path(calls["tmpdir"].name) / "Approved.lean")
 
     def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
         calls["n"] += 1
@@ -130,13 +129,20 @@ def install_approval_fake(*, guard_drift=False):
             })
             yield _ToolMeta("call_guard")
             yield Done(Usage(20, 10), 0.002)
-        elif guard_drift:
-            yield TextDelta("Done after guard.")
-            yield Done(Usage(5, 5), 0.0005)
-        elif calls["n"] <= 3:
+        elif not calls["proof_written"]:
+            calls["proof_written"] = True
+            if calls["proposal_count"] == 1:
+                proof_content = "import Mathlib\n\ntheorem approved_theorem : True := by trivial\n"
+            else:
+                proof_content = "import Mathlib\n\ntheorem approved_theorem : 2 + 2 = 4 := by norm_num\n"
             yield TextDelta("Proving now.")
-            yield ToolCall("echo", {"x": 2})
-            yield _ToolMeta("call_2")
+            yield ToolCall("write_file", {
+                "path": proof_path,
+                "content": proof_content,
+            })
+            yield _ToolMeta("call_write")
+            yield ToolCall("lean_check", {"path": proof_path})
+            yield _ToolMeta("call_check")
             yield Done(Usage(20, 10), 0.002)
         else:
             yield TextDelta("All done after approval.")
@@ -144,12 +150,6 @@ def install_approval_fake(*, guard_drift=False):
 
     agent.stream = fake_stream
     agent._tools.lean_check = lambda path: "warning: declaration uses 'sorry'"
-    if "echo" not in REGISTRY:
-        register(Tool(
-            name="echo",
-            schema={"name": "echo", "description": "echo args", "input_schema": {"type": "object"}},
-            handler=lambda a: "echoed:" + str(a),
-        ))
     agent._save_session = lambda *a, **k: None
     agent.load_system_prompt = lambda variant, skills=None: "SYS"
     agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
@@ -257,6 +257,43 @@ def install_final_gate_repair_fake():
     return calls, proof_path
 
 
+def install_no_artifact_repair_fake():
+    calls = {"n": 0, "messages": [], "checks": [], "tmpdir": tempfile.TemporaryDirectory()}
+    proof_path = str(Path(calls["tmpdir"].name) / "Recovered.lean")
+
+    def fake_stream(model, system, messages, tools, model_kwargs=None, streaming=True):
+        calls["n"] += 1
+        calls["messages"].append(messages)
+        if calls["n"] == 1:
+            yield TextDelta("Here is a proof in a Markdown code block.")
+            yield Done(Usage(7, 4), 0.0002)
+            return
+        if calls["n"] == 2:
+            yield TextDelta("Writing the proof file now.")
+            yield ToolCall("write_file", {
+                "path": proof_path,
+                "content": "theorem recovered : True := by trivial\n",
+            })
+            yield _ToolMeta("call_write")
+            yield ToolCall("lean_check", {"path": proof_path})
+            yield _ToolMeta("call_check")
+            yield Done(Usage(10, 5), 0.001)
+            return
+        yield TextDelta("Recovered.")
+        yield Done(Usage(3, 2), 0.0002)
+
+    def fake_lean_check(path):
+        calls["checks"].append(path)
+        return "OK — no errors, no warnings."
+
+    agent.stream = fake_stream
+    agent._tools.lean_check = fake_lean_check
+    agent._save_session = lambda *a, **k: None
+    agent.load_system_prompt = lambda variant, skills=None: "SYS"
+    agent._proposal_file = _ORIGINAL_PROPOSAL_FILE
+    return calls, proof_path
+
+
 def install_explicit_check_fake(*, edit_after_check=False):
     calls = {"n": 0, "messages": [], "checks": [], "tmpdir": tempfile.TemporaryDirectory()}
     proof_path = str(Path(calls["tmpdir"].name) / "Explicit.lean")
@@ -311,15 +348,18 @@ def test_run_events_sequence():
     events = list(agent.run_events(cfg(), "prove it"))
     types = [type(e).__name__ for e in events]
     expected_types = [
-        "TurnStarted", "AssistantTextDelta", "ToolCalled", "UsageUpdated", "ToolResulted",
+        "TurnStarted", "AssistantTextDelta", "ToolCalled", "ToolCalled", "UsageUpdated",
+        "ToolResulted", "ToolResulted",
         "TurnStarted", "AssistantTextDelta", "UsageUpdated", "Finished",
     ]
     check("event order", types == expected_types)
 
     by = {t: [e for e in events if type(e).__name__ == t] for t in set(types)}
-    check("turn-1 ToolCalled echo", by["ToolCalled"][0] == ToolCalled("echo", {"x": 1}))
+    check("turn-1 ToolCalled write_file", by["ToolCalled"][0].name == "write_file")
+    check("turn-1 ToolCalled lean_check", by["ToolCalled"][1].name == "lean_check")
     check("turn-1 UsageUpdated cost", by["UsageUpdated"][0] == UsageUpdated(100, 40, 0.003))
-    check("ToolResulted content", by["ToolResulted"][0].content == "echoed:{'x': 1}")
+    check("write_file result content", by["ToolResulted"][0].content.startswith("Wrote "))
+    check("lean_check result content", by["ToolResulted"][1].content == "OK — no errors, no warnings.")
 
     fin = events[-1]
     check("Finished.reason completed", fin.reason == "completed")
@@ -400,6 +440,23 @@ def test_final_gate_failed_check_resumes_loop():
         for message in calls["messages"][2]
     )
     check("model received final gate failure", saw_failure_prompt)
+
+
+def test_no_proof_artifact_resumes_loop():
+    calls, proof_path = install_no_artifact_repair_fake()
+    events = list(agent.run_events(cfg(max_turns=3), "prove it"))
+    fin = events[-1]
+    check("no-artifact run eventually completes", isinstance(fin, Finished) and fin.reason == "completed")
+    check("no-artifact recovery used lean_check", calls["checks"] == [proof_path])
+    check("no-artifact recovery resumed the model loop", calls["n"] == 3)
+    saw_no_artifact_prompt = any(
+        isinstance(message.get("content"), str)
+        and "no proof artifact was produced" in message["content"]
+        and "write_file" in message["content"]
+        and "lean_check" in message["content"]
+        for message in calls["messages"][1]
+    )
+    check("model received no-artifact correction", saw_no_artifact_prompt)
 
 
 def test_failed_final_gate_respects_max_turns():
@@ -612,6 +669,7 @@ def main():
     test_narrate_tool_steps_forces_text_before_silent_tool_call()
     test_run_wrapper_return_shape()
     test_final_gate_failed_check_resumes_loop()
+    test_no_proof_artifact_resumes_loop()
     test_failed_final_gate_respects_max_turns()
     test_final_gate_success_allows_completion()
     test_successful_explicit_check_skips_duplicate_final_gate()
